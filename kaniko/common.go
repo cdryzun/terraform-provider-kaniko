@@ -9,11 +9,9 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
-	apibatchv1 "k8s.io/api/batch/v1"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	batchv1 "k8s.io/client-go/kubernetes/typed/batch/v1"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/pointer"
@@ -53,10 +51,6 @@ func kanikoBuild(ctx context.Context, restConfig *rest.Config, opts *runOptions)
 	if err != nil {
 		return err
 	}
-	batchV1Client, err := batchv1.NewForConfig(restConfig)
-	if err != nil {
-		return err
-	}
 
 	namespace := defaultNamespace
 	if _, err = os.Stat(inClusterNamespaceFile); err == nil {
@@ -80,45 +74,56 @@ func kanikoBuild(ctx context.Context, restConfig *rest.Config, opts *runOptions)
 		return err
 	}
 
-	job := getKanikoJob(namespace, opts)
-	if _, err := batchV1Client.Jobs(namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
+	pod := getKanikoPod(namespace, opts)
+	if _, err := coreV1Client.Pods(namespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		return err
 	}
 
 	defer func() {
 		// Clean up.
-		if err = batchV1Client.Jobs(namespace).Delete(ctx, opts.ID, metav1.DeleteOptions{}); err != nil {
+		if err = coreV1Client.Pods(namespace).Delete(ctx, opts.ID, metav1.DeleteOptions{}); err != nil {
+			fmt.Println("failed to clean up kaniko job", map[string]any{"error": err})
 			tflog.Warn(ctx, "failed to clean up kaniko job", map[string]any{"error": err})
 		}
+
 		if err = coreV1Client.Secrets(namespace).Delete(ctx, opts.ID, metav1.DeleteOptions{}); err != nil {
+			fmt.Println("failed to clean up kaniko secret", map[string]any{"error": err})
 			tflog.Warn(ctx, "failed to clean up kaniko secret", map[string]any{"error": err})
 		}
 	}()
 
-	pw, err := batchV1Client.Jobs(namespace).Watch(ctx, metav1.ListOptions{})
-	if err != nil {
-		return err
-	}
-
-	for e := range pw.ResultChan() {
-		p, ok := e.Object.(*apibatchv1.Job)
-		if !ok {
-			tflog.Warn(ctx, "unexpected k8s resource event", map[string]any{"event": e})
-			continue
+OuterLoop:
+	for {
+		watch, err := coreV1Client.Pods(namespace).Watch(context.TODO(), metav1.ListOptions{
+			FieldSelector:  "metadata.name=" + opts.ID,
+			TimeoutSeconds: pointer.Int64Ptr(600), // Set the timeout to 1 hour
+		})
+		if err != nil {
+			panic(err)
 		}
-		if p.Name != opts.ID {
-			continue
-		}
-		if p.Status.CompletionTime != nil {
-			// Succeeded.
-			break
-		}
-		if p.Status.Failed > 0 {
-			logs, err := getJobPodsLogs(ctx, namespace, opts.ID, restConfig)
-			if err != nil {
-				return fmt.Errorf("kaniko job failed, but cannot get pod logs: %w", err)
+		ch := watch.ResultChan()
+		for event := range ch {
+			pod, ok := event.Object.(*apiv1.Pod)
+			if !ok {
+				tflog.Warn(ctx, "unexpected k8s resource event", map[string]any{"event": event})
+				continue
 			}
-			return fmt.Errorf("build logs: %s", logs)
+			if pod.Name != opts.ID {
+				continue
+			}
+
+			if pod.Status.Phase == apiv1.PodSucceeded {
+				// seccess
+				break OuterLoop
+			}
+
+			if pod.Status.Phase == apiv1.PodFailed {
+				logs, err := getJobPodsLogs(ctx, namespace, opts.ID, restConfig)
+				if err != nil {
+					return fmt.Errorf("kaniko job failed, but cannot get pod logs: %w", err)
+				}
+				return fmt.Errorf("build logs: %s", logs)
+			}
 		}
 	}
 
@@ -126,14 +131,15 @@ func kanikoBuild(ctx context.Context, restConfig *rest.Config, opts *runOptions)
 }
 
 // getJobPodsLogs returns the logs of all pods of a job.
-func getJobPodsLogs(ctx context.Context, namespace, jobName string, restConfig *rest.Config) (string, error) {
+func getJobPodsLogs(ctx context.Context, namespace, podName string, restConfig *rest.Config) (string, error) {
 	clientSet, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return "", err
 	}
-	ls := "job-name=" + jobName
 	pods, err := clientSet.CoreV1().Pods(namespace).
-		List(ctx, metav1.ListOptions{LabelSelector: ls})
+		List(ctx, metav1.ListOptions{
+			FieldSelector: "metadata.name=" + podName,
+		})
 	if err != nil {
 		return "", err
 	}
@@ -176,7 +182,7 @@ func getDockerConfigSecret(namespace, name, registry, username, password string)
 	}, nil
 }
 
-func getKanikoJob(namespace string, opts *runOptions) *apibatchv1.Job {
+func getKanikoPod(namespace string, opts *runOptions) *apiv1.Pod {
 	args := []string{
 		fmt.Sprintf("--dockerfile=%s", opts.Dockerfile),
 		fmt.Sprintf("--context=%s", opts.Context),
@@ -202,28 +208,23 @@ func getKanikoJob(namespace string, opts *runOptions) *apibatchv1.Job {
 		})
 	}
 
-	return &apibatchv1.Job{
+	return &apiv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
 			Name:      opts.ID,
 		},
-		Spec: apibatchv1.JobSpec{
-			BackoffLimit:            pointer.Int32(0),
-			TTLSecondsAfterFinished: pointer.Int32(3600),
-			Template: apiv1.PodTemplateSpec{
-				Spec: apiv1.PodSpec{
-					Containers: []apiv1.Container{
-						{
-							Name:         "build",
-							Image:        kanikoImage,
-							Args:         args,
-							VolumeMounts: volumeMounts,
-						},
-					},
-					Volumes:       volumes,
-					RestartPolicy: apiv1.RestartPolicyNever,
+		Spec: apiv1.PodSpec{
+			Containers: []apiv1.Container{
+				{
+					Name:         "build",
+					Image:        kanikoImage,
+					VolumeMounts: volumeMounts,
+					Args:         args,
 				},
 			},
+			Volumes:       volumes,
+			RestartPolicy: apiv1.RestartPolicyNever,
 		},
 	}
+
 }
