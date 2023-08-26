@@ -1,0 +1,39 @@
+version: '3'
+
+vars:
+  TEST: $$(go list ./... | grep -v 'vendor')
+  HOSTNAME: seal-io
+  NAME: kaniko
+  BINARY: terraform-provider-"{{ .NAME }}"
+  VERSION: 0.3.1
+  OS_ARCH: darwin_arm64
+  HOME_PATH:
+    sh: echo $HOME
+  
+tasks:
+  dep:
+    desc:  dep task
+    cmds:
+      - |-
+        go mod tidy
+  build:
+    desc:  build task
+    cmds:
+      - task: dep
+      - |-
+        go build -o "{{ .BINARY }}"
+  install:build:
+    desc:  install task
+    cmds:
+      - task: build
+      - |
+        mkdir -p "{{ .HOME_PATH }}/.terraform.d/plugins/{{ .HOSTNAME }}/{{ .NAME }}/{{ .VERSION }}/{{ .OS_ARCH }}"
+        mv "{{ .BINARY }}" "{{ .HOME_PATH }}/.terraform.d/plugins/{{ .HOSTNAME }}/{{ .NAME }}/{{ .VERSION }}/{{ .OS_ARCH }}"
+
+  default:
+    desc:  default task
+    cmds:
+      - task: install:build
+        
+
+    
