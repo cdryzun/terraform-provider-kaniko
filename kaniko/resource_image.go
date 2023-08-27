@@ -2,10 +2,8 @@ package kaniko
 
 import (
 	"context"
-	"fmt"
 	"os"
-
-	"github.com/seal-io/terraform-provider-kaniko/utils"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -127,21 +125,7 @@ func (r *imageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 	}
 }
 
-// Create creates the resource and sets the initial Terraform state.
-func (r *imageResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	tflog.Info(ctx, "Start Create")
-
-	// Retrieve values from plan.
-	var plan imageResourceModel
-	diags := req.Plan.Get(ctx, &plan)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	// Default values to environment variables, but override
-	// with Terraform configuration value if set.
-
+func getRunOptionsFromPlan(plan imageResourceModel) (*runOptions, error) {
 	gitUsername := os.Getenv("GIT_USERNAME")
 	gitPassword := os.Getenv("GIT_PASSWORD")
 	registryUsername := os.Getenv("REGISTRY_USERNAME")
@@ -173,7 +157,8 @@ func (r *imageResource) Create(ctx context.Context, req resource.CreateRequest, 
 		verbosity = plan.Verbosity.ValueString()
 	}
 
-	id := fmt.Sprintf("kaniko-%s", utils.String(8))
+	id := buildId(&plan).String()
+
 	options := &runOptions{
 		ID:               id,
 		GitPassword:      gitPassword,
@@ -190,13 +175,34 @@ func (r *imageResource) Create(ctx context.Context, req resource.CreateRequest, 
 		Verbosity:        verbosity,
 	}
 
-	err := kanikoBuild(ctx, r.restConfig, options)
+	return options, nil
+}
+
+// Create creates the resource and sets the initial Terraform state.
+func (r *imageResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	tflog.Info(ctx, "Start Create")
+
+	// Retrieve values from plan.
+	var plan imageResourceModel
+	diags := req.Plan.Get(ctx, &plan)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	options, err := getRunOptionsFromPlan(plan)
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to get run options from plan", err.Error())
+		return
+	}
+
+	plan.ID = buildId(&plan)
+
+	err = kanikoBuild(ctx, r.restConfig, options)
+
 	if err != nil {
 		resp.Diagnostics.AddError("kaniko build failed", err.Error())
 		return
 	}
-
-	plan.ID = types.StringValue(id)
 
 	// Set state to fully populated data.
 	diags = resp.State.Set(ctx, plan)
@@ -204,6 +210,7 @@ func (r *imageResource) Create(ctx context.Context, req resource.CreateRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 }
 
 // Read refreshes the Terraform state with the latest data.
@@ -223,6 +230,36 @@ func (r *imageResource) Read(ctx context.Context, req resource.ReadRequest, resp
 
 // Update updates the resource and sets the updated Terraform state on success.
 func (r *imageResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	tflog.Info(ctx, "Start Update")
+
+	// Retrieve values from plan.
+	var plan imageResourceModel
+	diags := req.Plan.Get(ctx, &plan)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	options, err := getRunOptionsFromPlan(plan)
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to get run options from plan", err.Error())
+		return
+	}
+
+	err = kanikoBuild(ctx, r.restConfig, options)
+
+	if err != nil {
+		resp.Diagnostics.AddError("kaniko build failed", err.Error())
+		return
+	}
+
+	plan.ID = buildId(&plan)
+
+	// Set state to fully populated data.
+	diags = resp.State.Set(ctx, plan)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 }
 
 // Delete deletes the resource and removes the Terraform state on success.
@@ -240,4 +277,11 @@ func (r *imageResource) Configure(_ context.Context, req resource.ConfigureReque
 	if !ok {
 		resp.Diagnostics.AddError("invalid provider data", "expected a rest config")
 	}
+}
+
+func buildId(resource *imageResourceModel) types.String {
+	// id := "kaniko_image-" + strings.Split(resource.Destination.ValueString()[strings.LastIndex(resource.Destination.ValueString(), "/")+1:], ":")[0]
+	str := "kaniko_image-" + strings.Split(resource.Destination.ValueString()[strings.LastIndex(resource.Destination.ValueString(), "/")+1:], ":")[0]
+	id := strings.ReplaceAll(str, "_", "-")
+	return types.StringValue(id)
 }

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
+	"github.com/seal-io/terraform-provider-kaniko/utils"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -52,6 +54,10 @@ func kanikoBuild(ctx context.Context, restConfig *rest.Config, opts *runOptions)
 		return err
 	}
 
+	// set pod name
+	podName := fmt.Sprintf("%s-%s", opts.ID, utils.String(8))
+	podName = strings.ReplaceAll(podName, "\"", "")
+
 	namespace := defaultNamespace
 	if _, err = os.Stat(inClusterNamespaceFile); err == nil {
 		namespaceBytes, err := os.ReadFile(inClusterNamespaceFile)
@@ -65,7 +71,7 @@ func kanikoBuild(ctx context.Context, restConfig *rest.Config, opts *runOptions)
 		return err
 	}
 	registry := fmt.Sprintf("https://%s/v1/", ref.Context().RegistryStr())
-	secret, err := getDockerConfigSecret(namespace, opts.ID, registry, opts.RegistryUsername, opts.RegistryPassword)
+	secret, err := getDockerConfigSecret(namespace, podName, registry, opts.RegistryUsername, opts.RegistryPassword)
 	if err != nil {
 		return err
 	}
@@ -74,19 +80,19 @@ func kanikoBuild(ctx context.Context, restConfig *rest.Config, opts *runOptions)
 		return err
 	}
 
-	pod := getKanikoPod(namespace, opts)
+	pod := getKanikoPod(namespace, opts, podName)
 	if _, err := coreV1Client.Pods(namespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		return err
 	}
 
 	defer func() {
 		// Clean up.
-		if err = coreV1Client.Pods(namespace).Delete(ctx, opts.ID, metav1.DeleteOptions{}); err != nil {
+		if err = coreV1Client.Pods(namespace).Delete(ctx, podName, metav1.DeleteOptions{}); err != nil {
 			fmt.Println("failed to clean up kaniko job", map[string]any{"error": err})
 			tflog.Warn(ctx, "failed to clean up kaniko job", map[string]any{"error": err})
 		}
 
-		if err = coreV1Client.Secrets(namespace).Delete(ctx, opts.ID, metav1.DeleteOptions{}); err != nil {
+		if err = coreV1Client.Secrets(namespace).Delete(ctx, podName, metav1.DeleteOptions{}); err != nil {
 			fmt.Println("failed to clean up kaniko secret", map[string]any{"error": err})
 			tflog.Warn(ctx, "failed to clean up kaniko secret", map[string]any{"error": err})
 		}
@@ -95,7 +101,7 @@ func kanikoBuild(ctx context.Context, restConfig *rest.Config, opts *runOptions)
 OuterLoop:
 	for {
 		watch, err := coreV1Client.Pods(namespace).Watch(context.TODO(), metav1.ListOptions{
-			FieldSelector:  "metadata.name=" + opts.ID,
+			FieldSelector:  "metadata.name=" + podName,
 			TimeoutSeconds: pointer.Int64Ptr(600), // Set the timeout to 1 hour
 		})
 		if err != nil {
@@ -108,7 +114,7 @@ OuterLoop:
 				tflog.Warn(ctx, "unexpected k8s resource event", map[string]any{"event": event})
 				continue
 			}
-			if pod.Name != opts.ID {
+			if pod.Name != podName {
 				continue
 			}
 
@@ -118,7 +124,7 @@ OuterLoop:
 			}
 
 			if pod.Status.Phase == apiv1.PodFailed {
-				logs, err := getJobPodsLogs(ctx, namespace, opts.ID, restConfig)
+				logs, err := getJobPodsLogs(ctx, namespace, podName, restConfig)
 				if err != nil {
 					return fmt.Errorf("kaniko job failed, but cannot get pod logs: %w", err)
 				}
@@ -182,7 +188,7 @@ func getDockerConfigSecret(namespace, name, registry, username, password string)
 	}, nil
 }
 
-func getKanikoPod(namespace string, opts *runOptions) *apiv1.Pod {
+func getKanikoPod(namespace string, opts *runOptions, podName string) *apiv1.Pod {
 	args := []string{
 		fmt.Sprintf("--dockerfile=%s", opts.Dockerfile),
 		fmt.Sprintf("--context=%s", opts.Context),
@@ -202,7 +208,7 @@ func getKanikoPod(namespace string, opts *runOptions) *apiv1.Pod {
 			Name: "docker-config",
 			VolumeSource: apiv1.VolumeSource{
 				Secret: &apiv1.SecretVolumeSource{
-					SecretName: opts.ID,
+					SecretName: podName,
 				},
 			},
 		})
@@ -211,7 +217,7 @@ func getKanikoPod(namespace string, opts *runOptions) *apiv1.Pod {
 	return &apiv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
-			Name:      opts.ID,
+			Name:      podName,
 		},
 		Spec: apiv1.PodSpec{
 			Containers: []apiv1.Container{

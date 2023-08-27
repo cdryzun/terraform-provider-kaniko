@@ -35,6 +35,18 @@ tasks:
     desc:  default task
     cmds:
       - task: install:build
+
+  install:test:
+    desc:  install task
+    cmds:
+      - task: build
+      - |
+        mkdir -p "{{ .HOME_PATH }}/.terraform.d/plugins/{{ .HOSTNAME }}/{{ .NAMESPACE }}/{{ .NAME }}/{{ .VERSION }}/{{ .OS_ARCH }}"
+        mv "{{ .BINARY }}" "{{ .HOME_PATH }}/.terraform.d/plugins/{{ .HOSTNAME }}/{{ .NAMESPACE }}/{{ .NAME }}/{{ .VERSION }}/{{ .OS_ARCH }}"
+        rm -rf examples/resources/kaniko_image/.terraform.lock.hcl
+        rm -rf examples/resources/kaniko_image/terraform.tfstate*
+        cd examples/resources/kaniko_image && terraform init -upgrade  && terraform apply -auto-approve
+
         
 
     
