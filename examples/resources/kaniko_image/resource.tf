@@ -12,15 +12,13 @@ provider "kaniko" {
 
 resource "kaniko_image" "example" {
   context     = "git://gitlab-ee.treesir.pub/demotest/walrus/simple-web-service"
-  dockerfile  = "Dockerfile"
+  dockerfile  = "Dockerfile-1"
   destination = "harbor.treesir.pub/yangzun/simple-web-service:pod-1"
-
   build_arg = {
   }
-
   cache             = false
   no_push           = false
   reproducible      = false
-  registry_password = ""
+  registry_password = "7opSfnsThQU9CYvqHoVL"
   registry_username = "yangzun"
 }

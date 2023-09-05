@@ -230,36 +230,6 @@ func (r *imageResource) Read(ctx context.Context, req resource.ReadRequest, resp
 
 // Update updates the resource and sets the updated Terraform state on success.
 func (r *imageResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	tflog.Info(ctx, "Start Update")
-
-	// Retrieve values from plan.
-	var plan imageResourceModel
-	diags := req.Plan.Get(ctx, &plan)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	options, err := getRunOptionsFromPlan(plan)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to get run options from plan", err.Error())
-		return
-	}
-
-	err = kanikoBuild(ctx, r.restConfig, options)
-
-	if err != nil {
-		resp.Diagnostics.AddError("kaniko build failed", err.Error())
-		return
-	}
-
-	plan.ID = buildId(&plan)
-
-	// Set state to fully populated data.
-	diags = resp.State.Set(ctx, plan)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
 }
 
 // Delete deletes the resource and removes the Terraform state on success.
